@@ -2,9 +2,9 @@
 
 [![ci](https://github.com/f4rkh4d/nanokern/actions/workflows/ci.yml/badge.svg)](https://github.com/f4rkh4d/nanokern/actions/workflows/ci.yml)
 
-a multitasking x86-64 kernel in 785 lines of c and asm. boots under qemu, runs a preemptive round-robin scheduler over three demo tasks, handles the timer irq, reads the ps/2 keyboard, hands out memory from a bump heap. designed to fit in my head.
+a multitasking x86-64 kernel in 960 lines of c and asm. boots under qemu, runs a preemptive round-robin scheduler over four demo tasks, dispatches `int 0x80` syscalls (write, puts, getpid, sleep, exit), handles the timer irq, reads the ps/2 keyboard, hands out memory from a bump heap. designed to fit in my head.
 
-![nanokern booted, A B C demo tasks counting in lockstep](docs/boot.png)
+![nanokern booted, four tasks counting, syscall vector wired](docs/boot.png)
 
 ## boot
 
@@ -21,33 +21,33 @@ nanokern 0.1.0 (x86-64, long mode)
 [boot] gdt loaded from boot.s
 [boot] idt installed (256 vectors)
 [boot] pic remapped (master=0x20, slave=0x28)
+[boot] syscall vector 0x80 wired (write, puts, getpid, sleep, exit)
 [boot] pit armed at 100 hz (10 ms)
 [boot] irq0 (timer) + irq1 (keyboard) unmasked
-[boot] scheduler online: 3 tasks ready
-[boot] heap: 224 / 1048576 bytes used
+[boot] scheduler online: 4 tasks ready (3 timer-driven, 1 syscall-driven)
+[boot] heap: 33008 / 1048576 bytes used
 [boot] enabling interrupts...
 
 init >
-A 25  B 25  C 25                   . 1s
+A 94  B 95  C 95  D 48 4
 ```
 
-three demo tasks (A, B, C) print their name and a counter on the bottom row. the counters advance at roughly 25 Hz each, which is exactly 100 Hz / 4 (the timer rate divided across the init loop and the three workers). that division IS the scheduler.
+four demo tasks share the cpu. A, B, C just `hlt` and let the timer rotate them — that's the scheduler. D does its work through real syscalls: `SYS_GETPID` once at start, `SYS_WRITE 'D'` per iteration, then `SYS_SLEEP 5` (50 ms). it shows up at a quarter the rate of A/B/C precisely because it gives up its quantum and waits.
 
 type something. the keyboard driver echoes it. a small seconds-since-boot counter ticks in the top-right corner, proving the timer irq is live.
 
-## proof it actually multitasks
+## proof it actually multitasks AND syscalls return
 
-each demo task also writes its initial to qemu's debugcon port. with `make smoke` you get an externally-observable trace:
+each tick task emits to qemu's debugcon port. task D emits `d` BEFORE the syscall (proves it got scheduled) and `D` AFTER the syscall returns (proves the kernel-side handler ran and control came back). `make smoke` enforces both:
 
 ```
 $ make smoke
-[smoke] booting in qemu for 4 seconds...
-[smoke] debugcon stream: CBACBACBACBACBACBACBACBACBA...
-[smoke] task counts after 4s: A=77 B=77 C=78
-[smoke] expected ~75 each (100 Hz / 4 tasks * 3 sec). pass.
+[debugcon] A=102 B=105 C=106  total=313
+[debugcon] d(pre-syscall)=53  D(post-syscall)=53
+[ok] nanokern booted, vga live, scheduler fair, syscalls return cleanly
 ```
 
-the smoke test is wired up in CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) so every push to main confirms a real kernel still boots and a real scheduler still rotates.
+if `d` and `D` ever differ by more than 1, the syscall path is dropping control somewhere. CI runs this on every push.
 
 ## toolchain
 
@@ -64,19 +64,21 @@ apt install nasm qemu-system-x86 gcc-x86-64-linux-gnu   # debian-ish
 - **idt + isr stubs.** 256 vectors, generated with nasm macros that push a dummy error code for vectors that don't push one, so the common dispatcher sees a uniform stack.
 - **pic.** legacy 8259 remap (master to 0x20, slave to 0x28) because legacy-free x86 is a lie.
 - **pit.** channel 0 at 100 hz, 10 ms quantum.
-- **scheduler.** preemptive round-robin over a circular ready ring. timer irq calls `sched_tick`, which saves the current task's callee-saved registers via a 14-instruction `context_switch` and rotates `rsp` to the next task. each task has its own 8 KiB kernel stack with a hand-built initial frame so the first switch to a new task lands inside `task_entry_trampoline`. ring 0 only for now; user mode is roadmap.
+- **scheduler.** preemptive round-robin over a circular ready ring. timer irq calls `sched_tick`, which saves the current task's callee-saved registers via a 14-instruction `context_switch` and rotates `rsp` to the next task. each task has its own 8 KiB kernel stack with a hand-built initial frame so the first switch to a new task lands inside `task_entry_trampoline`.
+- **task sleeping.** `sched_sleep(ticks)` parks the calling task in `TASK_SLEEPING` with a deadline; on every tick the scheduler walks the ring and wakes any task whose deadline has passed. this is what makes `SYS_SLEEP` honest.
+- **syscalls via `int 0x80`.** five wired today (`SYS_WRITE`, `SYS_PUTS`, `SYS_GETPID`, `SYS_SLEEP`, `SYS_EXIT`). caller convention: rax = syscall number, rdi/rsi/rdx = args 0..2, return value in rax. the asm stub now passes the saved-regs frame to the dispatcher so a syscall handler can read its arguments out of `rax/rdi/rsi/rdx` and write a return value back into `rax`. the same path will carry user-mode calls when the gdt + tss + sysret pieces land.
 - **keyboard.** ps/2 irq1, scancode set 1, fixed us layout (no shift/ctrl yet), 128-byte ring buffer consumed by the init loop.
 - **heap.** a bump allocator. 1 MiB pool. `kfree` doesn't exist yet because a bump with no slab has nothing honest to do there.
 - **vga.** 80x25 text, a tiny `vga_printf` that knows `%s %c %d %x %p`.
 
-## what's *not* in it yet (the v0.4 roadmap)
+## what's *not* in it yet (the v0.5 roadmap)
 
-- **syscalls via `int 0x80`.** `write`, `read`, `spawn`, `exit`, `sleep`.
 - **higher-half kernel at `0xffffffff80000000`.** currently identity-mapped, which is simpler but not how any serious kernel is laid out.
 - **slab + real pmm.** bump is fine for boot but won't go the distance.
 - **stage1/stage2 bootsector.** the multiboot shortcut is a concession to iteration speed. replacing it with a 512-byte real-mode stage1 is a deliberate future loss.
-- **user mode via sysret + a tss.** preempting ring-3 means a tss with rsp0, syscall msr setup, and not getting any of that wrong.
+- **user mode via sysret + a tss.** preempting ring-3 means a tss with rsp0, syscall msr setup, and not getting any of that wrong. the syscall surface is already in place; what's missing is the privilege boundary that makes it useful.
 - **a real `kfree`.** when the bump goes, the slab arrives.
+- **more syscalls.** read (block on keyboard), spawn, wait, getticks. tracking which ones to add by what task d wants to do next.
 
 ## layout
 
@@ -84,23 +86,25 @@ apt install nasm qemu-system-x86 gcc-x86-64-linux-gnu   # debian-ish
 src/
   boot/boot.s              multiboot entry, 32-bit to long mode
   kernel/
-    main.c                 kmain + demo tasks
+    main.c                 kmain + demo tasks A/B/C/D
     vga.c, vga.h           80x25 text + tiny printf
-    idt.c, idt.h           256-vector idt, dispatcher
+    idt.c, idt.h           256-vector idt, dispatcher (passes regs frame to handlers)
     pic.c, pic.h           8259 remap + eoi + mask
     pit.c, pit.h           channel 0 timer
     kbd.c, kbd.h           ps/2 irq + ring buffer
     heap.c, heap.h         bump allocator
-    sched.c, sched.h       round-robin scheduler
+    sched.c, sched.h       round-robin scheduler + sleep / wake
+    syscall.c, syscall.h   int 0x80 dispatcher + handlers
+    regs.h                 saved-regs frame layout (mirrors isr_stubs.s push order)
     types.h                fixed-width ints + port i/o + debugcon
     arch/isr_stubs.s       256 isr stubs, nasm-generated
     arch/sched_asm.s       context_switch + task_entry_trampoline
 linker.ld                  elf64 layout, starts at 1 MiB physical
 Makefile                   clang-free, uses x86_64-elf-gcc + nasm
-scripts/smoke.sh           4-second qemu boot + scheduler-fairness check
+scripts/smoke.sh           4-second qemu boot + scheduler + syscall sanity check
 ```
 
-785 lines of c and asm total, counted by `find src -type f | xargs wc -l`.
+960 lines of c and asm total, counted by `find src -type f | xargs wc -l`.
 
 ## why
 

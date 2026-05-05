@@ -36,9 +36,9 @@ void idt_set(u8 vec, void *stub, u8 type_attr) {
 
 void idt_register(u8 vec, irq_handler_t h) { handlers[vec] = h; }
 
-void isr_common_dispatch(u64 vec, u64 err) {
+void isr_common_dispatch(u64 vec, u64 err, regs_t *regs) {
     if (handlers[vec]) {
-        handlers[vec](vec, err);
+        handlers[vec](vec, err, regs);
     } else if (vec < 32) {
         vga_printf("\n!! exception vec=%d err=%x — halting\n", (int)vec, err);
         for (;;) { cli(); hlt(); }

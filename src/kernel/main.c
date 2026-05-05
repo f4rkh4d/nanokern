@@ -5,10 +5,12 @@
 #include "pit.h"
 #include "kbd.h"
 #include "heap.h"
+#include "regs.h"
 #include "sched.h"
+#include "syscall.h"
 
-static void timer_isr(u64 vec, u64 err) {
-    (void)vec; (void)err;
+static void timer_isr(u64 vec, u64 err, regs_t *regs) {
+    (void)vec; (void)err; (void)regs;
     pit_ticks++;
     // ack the master pic before we possibly switch away from this task. the dispatcher
     // will eoi again on its way out; the second ack on a non-pending irq0 is harmless.
@@ -16,10 +18,28 @@ static void timer_isr(u64 vec, u64 err) {
     sched_tick();
 }
 
-static void kbd_isr(u64 vec, u64 err) {
-    (void)vec; (void)err;
+static void kbd_isr(u64 vec, u64 err, regs_t *regs) {
+    (void)vec; (void)err; (void)regs;
     u8 sc = kbd_scancode();
     kbd_push(sc);
+}
+
+// minimal syscall wrappers used by demo tasks. compiles to a single int 0x80
+// with the args already in the right registers.
+static inline u64 syscall0(u64 num) {
+    u64 ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num) : "memory", "rcx", "r11");
+    return ret;
+}
+static inline u64 syscall1(u64 num, u64 a0) {
+    u64 ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0) : "memory", "rcx", "r11");
+    return ret;
+}
+static inline u64 syscall2(u64 num, u64 a0, u64 a1) {
+    u64 ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0), "S"(a1) : "memory", "rcx", "r11");
+    return ret;
 }
 
 // three demo tasks. each one writes a single character into a fixed column on the last
@@ -65,6 +85,29 @@ static void task_c(void) {
     }
 }
 
+// task d: uses real syscalls (int 0x80) for everything. each loop iteration
+// emits a 'd' to debugcon BEFORE the syscall (proves the task got scheduled),
+// then SYS_WRITE'es a 'D' to VGA via the syscall path (proves syscall returns
+// properly and the kernel-side handler reached vga), then SYS_SLEEPs for 50 ms.
+static volatile u32 d_count;
+static void task_d(void) {
+    u64 my_pid = syscall0(SYS_GETPID);
+    for (;;) {
+        d_count++;
+        debug_putc('d');                 // pre-syscall sentinel: task is alive
+        syscall1(SYS_WRITE, (u64)'D');   // post-syscall: SYS_WRITE landed in vga_putc
+        debug_putc('D');                 // syscall returned and we ran past it
+        volatile u16 *vga = (volatile u16*)0xb8000;
+        vga[24*80 + 26] = (0x09 << 8) | 'D';
+        vga[24*80 + 28] = (0x09 << 8) | ('0' + (d_count / 10) % 10);
+        vga[24*80 + 29] = (0x09 << 8) | ('0' + d_count % 10);
+        if (d_count == 1) {
+            vga[24*80 + 31] = (0x09 << 8) | ('0' + ((u32)my_pid % 10));
+        }
+        syscall1(SYS_SLEEP, 5);    // 5 ticks = 50 ms
+    }
+}
+
 static const char *banner =
     "nanokern 0.1.0 (x86-64, long mode)\n"
     "-----------------------------------\n";
@@ -85,6 +128,8 @@ void kmain(void) {
 
     idt_register(32, timer_isr);
     idt_register(33, kbd_isr);
+    idt_register(0x80, syscall_isr);
+    vga_puts("[boot] syscall vector 0x80 wired (write, puts, getpid, sleep, exit)\n");
 
     pit_init(100);
     vga_puts("[boot] pit armed at 100 hz (10 ms)\n");
@@ -97,7 +142,8 @@ void kmain(void) {
     task_spawn("task-a", task_a);
     task_spawn("task-b", task_b);
     task_spawn("task-c", task_c);
-    vga_puts("[boot] scheduler online: 3 tasks ready\n");
+    task_spawn("task-d", task_d);   // syscall-using task
+    vga_puts("[boot] scheduler online: 4 tasks ready (3 timer-driven, 1 syscall-driven)\n");
 
     vga_printf("[boot] heap: %d / %d bytes used\n",
                (u64)kheap_used(), (u64)kheap_size());

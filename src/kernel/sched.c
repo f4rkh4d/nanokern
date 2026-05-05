@@ -4,6 +4,7 @@
 
 #include "sched.h"
 #include "heap.h"
+#include "pit.h"
 #include "types.h"
 
 #define TASK_STACK_BYTES 8192
@@ -73,6 +74,16 @@ task_t *task_spawn(const char *name, task_fn entry) {
 void sched_tick(void) {
     if (!current || !ring) return;
 
+    // wake any sleeping tasks whose deadline has passed. cheap walk over the
+    // ring; with task counts in the single digits it costs nothing.
+    task_t *p = ring;
+    do {
+        if (p->state == TASK_SLEEPING && pit_ticks >= p->wake_at) {
+            p->state = TASK_READY;
+        }
+        p = p->next;
+    } while (p != ring);
+
     // pick the next ready task by walking forward in the ring. give up after one full
     // lap; if nothing else is ready, stay on current.
     task_t *next = current->next;
@@ -87,6 +98,13 @@ void sched_tick(void) {
     current = next;
     switches++;
     context_switch(&prev->rsp, next->rsp);
+}
+
+void sched_sleep(u64 ticks) {
+    if (!current) return;
+    current->state   = TASK_SLEEPING;
+    current->wake_at = pit_ticks + ticks;
+    sched_tick();
 }
 
 u32         sched_current_id(void)   { return current ? current->id : 0; }

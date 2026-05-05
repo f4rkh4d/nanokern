@@ -51,7 +51,7 @@ for r in range(25):
 if not got_banner:
     sys.exit("missing banner, boot probably failed")
 
-# 2. scheduler fairness check
+# 2. scheduler fairness check across the three timer-driven tasks
 log = open(log_path, "rb").read().decode("ascii", "ignore")
 a, b, c = log.count("A"), log.count("B"), log.count("C")
 print(f"[debugcon] A={a} B={b} C={c}  total={a+b+c}")
@@ -60,5 +60,17 @@ if min(a, b, c) < 30:
 spread = max(a, b, c) - min(a, b, c)
 if spread > 10:
     sys.exit(f"scheduler unfair: spread {spread} too large for round-robin")
-print("[ok] nanokern booted, vga live, scheduler fair across 3 tasks")
+
+# 3. syscall path check via task_d
+#    'd' = pre-syscall sentinel (proves task_d got scheduled)
+#    'D' = post-syscall sentinel (proves SYS_WRITE returned control)
+#    after one boot worth of run, both should be > 10 and differ by at most 1
+d_pre  = log.count("d")
+d_post = log.count("D")
+print(f"[debugcon] d(pre-syscall)={d_pre}  D(post-syscall)={d_post}")
+if d_pre < 10:
+    sys.exit(f"task_d never ran enough: d={d_pre}")
+if abs(d_pre - d_post) > 1:
+    sys.exit(f"syscall path drops control: d={d_pre} vs D={d_post}")
+print("[ok] nanokern booted, vga live, scheduler fair, syscalls return cleanly")
 PY

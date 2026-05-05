@@ -33,6 +33,7 @@ isr_common:
 
     mov rdi, [rsp + 9*8]       ; vec
     mov rsi, [rsp + 10*8]      ; err
+    mov rdx, rsp               ; pointer to saved-regs frame (regs_t*)
     call isr_common_dispatch
 
     pop r11
