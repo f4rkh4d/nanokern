@@ -28,3 +28,8 @@ static inline void cli(void) { __asm__ volatile("cli"); }
 static inline void sti(void) { __asm__ volatile("sti"); }
 static inline void hlt(void) { __asm__ volatile("hlt"); }
 static inline void io_wait(void) { outb(0x80, 0); }
+
+// qemu's isa-debugcon: any byte written to 0xe9 prints to whatever -debugcon points at.
+// real hardware ignores this port. used to externalize proof of life from the kernel
+// for ci and asciinema captures.
+static inline void debug_putc(char c) { outb(0xe9, (u8)c); }

@@ -15,14 +15,14 @@ CFLAGS  := -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone \
 
 LDFLAGS := -n -T linker.ld -nostdlib -z max-page-size=0x1000
 
-ASM_SRC := src/boot/boot.s src/kernel/arch/isr_stubs.s
+ASM_SRC := src/boot/boot.s src/kernel/arch/isr_stubs.s src/kernel/arch/sched_asm.s
 C_SRC   := $(wildcard src/kernel/*.c)
 
 ASM_OBJ := $(patsubst %.s,$(BUILD)/%.o,$(ASM_SRC))
 C_OBJ   := $(patsubst %.c,$(BUILD)/%.o,$(C_SRC))
 OBJ     := $(ASM_OBJ) $(C_OBJ)
 
-.PHONY: all run clean
+.PHONY: all run smoke clean
 
 all: $(KERNEL)
 
@@ -49,6 +49,9 @@ run: $(KERNEL)
 
 run-nox: $(KERNEL)
 	$(QEMU) -kernel $(KERNEL) -serial stdio -display none -m 128M -no-reboot
+
+smoke: $(KERNEL)
+	@bash scripts/smoke.sh
 
 clean:
 	rm -rf $(BUILD)
